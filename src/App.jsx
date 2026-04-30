@@ -474,7 +474,20 @@ function WeatherMap({ center, onSelectLocation }) {
   );
 }
 
-function WeatherPanel({ weather, place, coords, loading, error }) {
+function WeatherPanel({
+  weather,
+  place,
+  coords,
+  loading,
+  error,
+  searchQuery,
+  onSearchChange,
+  onSearchSubmit,
+  suggestions,
+  searchingPlaces,
+  searchError,
+  onPickSuggestion,
+}) {
   const hourly = useMemo(() => getHourlyToday(weather), [weather]);
   const current = weather?.current || {};
   const weatherText = weatherCodeToText(current.weather_code);
@@ -492,6 +505,45 @@ function WeatherPanel({ weather, place, coords, loading, error }) {
             <div className="coords">
               {coords.lat.toFixed(4)}, {coords.lon.toFixed(4)}
             </div>
+            <form
+              className="search-wrap"
+              onSubmit={(e) => {
+                e.preventDefault();
+                onSearchSubmit();
+              }}
+            >
+              <input
+                className="search-input"
+                type="text"
+                placeholder="Busca una ciudad..."
+                value={searchQuery}
+                onChange={(e) => onSearchChange(e.target.value)}
+              />
+              <button className="search-btn" type="submit">
+                Buscar
+              </button>
+              {(searchingPlaces || suggestions.length > 0 || searchError) && (
+                <div className="search-suggest card">
+                  {searchingPlaces && <div className="search-status">Buscando ubicaciones...</div>}
+                  {!searchingPlaces && searchError && <div className="search-status">{searchError}</div>}
+                  {!searchingPlaces &&
+                    !searchError &&
+                    suggestions.map((item, idx) => (
+                      <button
+                        key={`${item.lat}-${item.lon}-${idx}`}
+                        className="search-item"
+                        type="button"
+                        onClick={() => onPickSuggestion(item)}
+                      >
+                        <span className="search-name">{item.name}</span>
+                        <span className="search-meta">
+                          {Number(item.lat).toFixed(3)}, {Number(item.lon).toFixed(3)}
+                        </span>
+                      </button>
+                    ))}
+                </div>
+              )}
+            </form>
           </div>
           <div className="hero-icon">{weather ? <WeatherIcon code={current.weather_code} size={110} /> : null}</div>
         </div>
@@ -545,6 +597,7 @@ function WeatherPanel({ weather, place, coords, loading, error }) {
 }
 
 export default function App() {
+  const latestSearchRequestRef = useRef(0);
   const [coords, setCoords] = useState({
     lat: DEFAULT_LOCATION.lat,
     lon: DEFAULT_LOCATION.lon,
@@ -553,6 +606,10 @@ export default function App() {
   const [place, setPlace] = useState(DEFAULT_LOCATION.label);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [searchQuery, setSearchQuery] = useState(DEFAULT_LOCATION.label);
+  const [suggestions, setSuggestions] = useState([]);
+  const [searchingPlaces, setSearchingPlaces] = useState(false);
+  const [searchError, setSearchError] = useState("");
 
   const fetchWeatherAndPlace = useCallback(async (lat, lon) => {
     setLoading(true);
@@ -582,8 +639,10 @@ export default function App() {
         const geoData = await gRes.json();
         const pretty = formatPlaceName(geoData);
         setPlace(pretty || `Lat ${lat.toFixed(3)}, Lon ${lon.toFixed(3)}`);
+        setSearchQuery(pretty || `Lat ${lat.toFixed(3)}, Lon ${lon.toFixed(3)}`);
       } else {
         setPlace(`Lat ${lat.toFixed(3)}, Lon ${lon.toFixed(3)}`);
+        setSearchQuery(`Lat ${lat.toFixed(3)}, Lon ${lon.toFixed(3)}`);
       }
     } catch (e) {
       setError("No pudimos actualizar los datos. Revisa la conexión e inténtalo otra vez.");
@@ -595,10 +654,85 @@ export default function App() {
   const handleSelectLocation = useCallback(
     (lat, lon) => {
       setCoords({ lat, lon });
+      setSuggestions([]);
+      setSearchError("");
       fetchWeatherAndPlace(lat, lon);
     },
     [fetchWeatherAndPlace]
   );
+
+  const handlePickSuggestion = useCallback(
+    (item) => {
+      const lat = Number(item.lat);
+      const lon = Number(item.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+      setSearchQuery(item.name);
+      setSuggestions([]);
+      setSearchError("");
+      handleSelectLocation(lat, lon);
+    },
+    [handleSelectLocation]
+  );
+
+  const handleSearchSubmit = useCallback(() => {
+    if (!suggestions.length) {
+      if (searchQuery.trim().length >= 2) {
+        setSearchError("No encontramos resultados para esa búsqueda.");
+      }
+      return;
+    }
+    handlePickSuggestion(suggestions[0]);
+  }, [handlePickSuggestion, searchQuery, suggestions]);
+
+  useEffect(() => {
+    const term = searchQuery.trim();
+    if (term.length < 2) {
+      latestSearchRequestRef.current += 1;
+      setSuggestions([]);
+      setSearchError("");
+      setSearchingPlaces(false);
+      return undefined;
+    }
+
+    const requestId = latestSearchRequestRef.current + 1;
+    latestSearchRequestRef.current = requestId;
+    const timer = setTimeout(async () => {
+      try {
+        setSearchingPlaces(true);
+        setSearchError("");
+        const url =
+          `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(term)}` +
+          `&format=jsonv2&addressdetails=1&limit=6`;
+        const response = await fetch(url, {
+          headers: { Accept: "application/json" },
+        });
+        if (!response.ok) throw new Error("Sin resultados");
+        const data = await response.json();
+        if (requestId !== latestSearchRequestRef.current) return;
+        const mapped = (Array.isArray(data) ? data : []).map((item) => ({
+          lat: item.lat,
+          lon: item.lon,
+          name: item.display_name || "Ubicación",
+        }));
+        setSuggestions(mapped);
+        if (!mapped.length) {
+          setSearchError("No hay coincidencias.");
+        }
+      } catch (err) {
+        if (requestId !== latestSearchRequestRef.current) return;
+        setSuggestions([]);
+        setSearchError("No pudimos buscar ciudades ahora.");
+      } finally {
+        if (requestId === latestSearchRequestRef.current) {
+          setSearchingPlaces(false);
+        }
+      }
+    }, 350);
+
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [searchQuery]);
 
   useEffect(() => {
     fetchWeatherAndPlace(DEFAULT_LOCATION.lat, DEFAULT_LOCATION.lon);
@@ -667,6 +801,80 @@ export default function App() {
         .place{margin:5px 0 3px; font-size:30px; line-height:1.1; font-weight:500; letter-spacing:.2px;}
         .coords{color:var(--muted); font-size:13px;}
         .hero-icon{filter: drop-shadow(0 10px 20px rgba(0,194,255,.22));}
+        .search-wrap{
+          position:relative;
+          margin-top:10px;
+          display:flex;
+          gap:8px;
+          max-width:560px;
+        }
+        .search-input{
+          flex:1;
+          background:rgba(255,255,255,0.04);
+          border:1px solid rgba(0,194,255,0.22);
+          color:var(--text);
+          border-radius:10px;
+          padding:10px 12px;
+          font-size:14px;
+          outline:none;
+          transition:border-color .2s ease, box-shadow .2s ease;
+        }
+        .search-input::placeholder{color:rgba(200,220,255,.45);}
+        .search-input:focus{
+          border-color:rgba(0,194,255,0.5);
+          box-shadow:0 0 0 3px rgba(0,194,255,0.12);
+        }
+        .search-btn{
+          background:linear-gradient(180deg, rgba(0,194,255,.95), rgba(0,136,204,.95));
+          border:0;
+          color:#04101d;
+          border-radius:10px;
+          padding:10px 14px;
+          font-weight:600;
+          cursor:pointer;
+          font-family:'DM Sans', sans-serif;
+        }
+        .search-suggest{
+          position:absolute;
+          left:0;
+          right:0;
+          top:46px;
+          z-index:9;
+          max-height:220px;
+          overflow:auto;
+          padding:6px;
+          border-radius:12px;
+          background:rgba(6,15,30,.88);
+        }
+        .search-item{
+          width:100%;
+          text-align:left;
+          border:0;
+          background:transparent;
+          color:var(--text);
+          border-radius:8px;
+          padding:8px;
+          cursor:pointer;
+          display:flex;
+          flex-direction:column;
+          gap:2px;
+        }
+        .search-item:hover{background:rgba(0,194,255,0.12);}
+        .search-name{
+          font-size:13px;
+          color:#DFF3FF;
+          line-height:1.3;
+        }
+        .search-meta{
+          font-family:'Space Grotesk', sans-serif;
+          font-size:12px;
+          color:rgba(200,220,255,.65);
+        }
+        .search-status{
+          padding:8px;
+          font-size:13px;
+          color:rgba(200,220,255,.72);
+        }
 
         .label{
           color:var(--muted);
@@ -869,6 +1077,13 @@ export default function App() {
         coords={coords}
         loading={loading}
         error={error}
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
+        onSearchSubmit={handleSearchSubmit}
+        suggestions={suggestions}
+        searchingPlaces={searchingPlaces}
+        searchError={searchError}
+        onPickSuggestion={handlePickSuggestion}
       />
       <WeatherMap center={coords} onSelectLocation={handleSelectLocation} />
     </div>
